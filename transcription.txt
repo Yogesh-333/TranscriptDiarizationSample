@@ -1,0 +1,16 @@
+
+Speaker: SPEAKER_02
+Time: 0:00:03 -> 0:00:09
+Text: Mark? Hi! It's been ages since I last saw you. How are you and Jackie?  Yeah, good thanks.
+
+Speaker: SPEAKER_01
+Time: 0:00:13 -> 0:00:19
+Text: You've got a good memory. Yes, he's two now. What about you? Are you still working in the health centre?  Yes, for the time being, but we're moving in a couple of months. Anyhow, I'd better go. I'm late for work.
+
+Speaker: SPEAKER_02
+Time: 0:00:23 -> 0:00:28
+Text: Yes, for the time being, but we're moving in a couple of months. Anyhow, I'd better go. I'm late for work.  Lovely to see you again.
+
+Speaker: SPEAKER_01
+Time: 0:00:28 -> 0:00:30
+Text: Yeah, likewise. Keep in touch.

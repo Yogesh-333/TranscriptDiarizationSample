@@ -1,0 +1,145 @@
+Audio Transcription Tool - Installation Guide
+==========================================
+
+1. System Requirements
+-------------------
+- Python 3.8 or higher
+- Windows 10/11
+- At least 8GB RAM
+- Internet connection
+- HuggingFace account and token
+
+2. Initial Setup
+--------------
+# Open PowerShell as Administrator and run these commands:
+
+# Set execution policy
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+
+# Create project directory
+mkdir audio_transcription
+cd audio_transcription
+
+# Create and activate virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+3. Required Packages
+-----------------
+# Install core packages
+pip install openai-whisper
+pip install torch torchaudio
+pip install pyannote.audio
+pip install transformers
+pip install huggingface-hub
+pip install pydub
+pip install soundfile
+
+4. FFmpeg Installation
+-------------------
+# Option 1: Using Chocolatey (Recommended)
+# First, install Chocolatey if not installed:
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+# Then install FFmpeg:
+choco install ffmpeg
+
+# Option 2: Manual FFmpeg Installation
+1. Download FFmpeg from https://www.gyan.dev/ffmpeg/builds/
+2. Extract the ZIP file
+3. Add the bin folder to System PATH
+
+5. HuggingFace Setup
+-----------------
+1. Create account at https://huggingface.co/
+2. Go to Settings -> Access Tokens
+3. Create new token with 'read' access
+4. Accept the user agreement at:
+   - https://huggingface.co/pyannote/speaker-diarization
+   - https://huggingface.co/pyannote/segmentation
+
+6. Verify Installation
+-------------------
+# Create test.py with this content:
+import torch
+import whisper
+import pyannote.audio
+print("Torch version:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("Whisper available:", whisper.__version__)
+print("Pyannote audio available:", pyannote.audio.__version__)
+
+# Run test
+python test.py
+
+7. Troubleshooting
+----------------
+Common Issues and Solutions:
+
+A. If you get symlink warnings:
+   Add these lines at start of your script:
+   import os
+   os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+   os.environ['SPEECHBRAIN_DISABLE_SYMLINKS'] = '1'
+
+B. If CUDA is not detected:
+   1. Install NVIDIA drivers
+   2. Reinstall torch with CUDA:
+   pip uninstall torch torchaudio
+   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+C. If FFmpeg is not found:
+   1. Verify installation: ffmpeg -version
+   2. Check PATH environment variable
+   3. Restart PowerShell
+
+D. If virtual environment won't activate:
+   Try alternative activation methods:
+   1. & ".\venv\Scripts\Activate.ps1"
+   2. $env:Path = "$PWD\.venv\Scripts;$env:Path"
+
+8. Directory Structure
+-------------------
+audio_transcription/
+├── .venv/
+├── test.py
+├── transcriber.py
+├── audio_files/
+└── transcriptions/
+
+9. Audio File Requirements
+-----------------------
+- Supported formats: WAV, MP3, M4A, FLAC
+- Recommended: WAV format, 16kHz sample rate
+- Clear audio with minimal background noise
+- Distinct speaker separation for better diarization
+
+10. Additional Resources
+---------------------
+- FFmpeg documentation: https://ffmpeg.org/documentation.html
+- HuggingFace docs: https://huggingface.co/docs
+- Whisper GitHub: https://github.com/openai/whisper
+- Pyannote Audio: https://github.com/pyannote/pyannote-audio
+
+11. Environment Variables
+----------------------
+# Add these to your system or script:
+HF_TOKEN=your_huggingface_token
+PYTHONPATH=${PYTHONPATH}:/path/to/your/project
+
+12. Regular Maintenance
+--------------------
+# Update packages periodically:
+pip install --upgrade openai-whisper
+pip install --upgrade torch torchaudio
+pip install --upgrade pyannote.audio
+pip install --upgrade transformers
+pip install --upgrade huggingface-hub
+
+13. Contact & Support
+------------------
+- Report issues on GitHub
+- Check HuggingFace forums for common solutions
+- Ensure you have accepted all necessary model licenses
+
+Note: Keep your HuggingFace token secure and never share it publicly.
