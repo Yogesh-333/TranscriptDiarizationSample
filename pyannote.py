@@ -9,6 +9,9 @@ import os
 from datetime import datetime
 import pandas as pd
 import logging
+from pydub import AudioSegment
+import io
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,38 +26,38 @@ st.set_page_config(
 
 # Custom CSS
 st.markdown("""
-    <style>
-    .main {
-        padding: 2rem;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-    .speaker-header {
-        color: #1f77b4;
-        margin-top: 20px;
-    }
-    .timestamp {
-        color: #666;
-        font-size: 0.9em;
-    }
-    .stProgress > div > div > div > div {
-        background-color: #1f77b4;
-    }
-    .debug-info {
-        background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 5px;
-        margin: 10px 0;
-    }
-    .transcription-text {
-        font-size: 1.1em;
-        margin: 5px 0;
-        padding: 5px;
-        border-left: 3px solid #1f77b4;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+<style>
+.main {
+    padding: 2rem;
+}
+.stButton>button {
+    width: 100%;
+}
+.speaker-header {
+    color: #1f77b4;
+    margin-top: 20px;
+}
+.timestamp {
+    color: #666;
+    font-size: 0.9em;
+}
+.stProgress > div > div > div > div {
+    background-color: #1f77b4;
+}
+.debug-info {
+    background-color: #f0f2f6;
+    padding: 10px;
+    border-radius: 5px;
+    margin: 10px 0;
+}
+.transcription-text {
+    font-size: 1.1em;
+    margin: 5px 0;
+    padding: 5px;
+    border-left: 3px solid #1f77b4;
+}
+</style>
+""", unsafe_allow_html=True)
 
 def check_cuda_availability():
     """Check CUDA and GPU availability"""
@@ -72,54 +75,122 @@ def format_timestamp(seconds):
     seconds = int(seconds % 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-def process_audio(audio_path, pipeline, whisper_model, num_speakers=None, min_speakers=None, 
-                 max_speakers=None, whisper_language=None, whisper_task="transcribe", use_gpu=False):
-    """Process audio file with diarization and transcription"""
-    
-    logger.info("Starting audio processing")
-    
-    # Load and resample audio
-    audio, sr = torchaudio.load(audio_path)
-    logger.info(f"Loaded audio with sample rate: {sr}")
-    
-    if sr != 16000:
-        resampler = torchaudio.transforms.Resample(sr, 16000)
-        audio = resampler(audio)
-        logger.info("Resampled audio to 16kHz")
-    
-    audio = audio.squeeze().numpy()
-    
-    # Device configuration
-    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
-    
-    # Transcribe with whisper
-    logger.info("Starting Whisper transcription")
-    transcription = whisper_model.transcribe(
-        audio,
-        language=whisper_language if whisper_language else None,
-        task=whisper_task,
-        fp16=use_gpu
-    )
-    logger.info("Completed Whisper transcription")
-    
-    # Perform diarization
-    logger.info("Starting diarization")
-    diarization = pipeline(
-        audio_path,
-        num_speakers=num_speakers,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers
-    )
-    logger.info("Completed diarization")
-    
-    return diarization, transcription
+def chunk_audio(audio_file, chunk_duration_ms=10000):
+    """Split audio into chunks"""
+    try:
+        # Read the uploaded file content
+        audio_bytes = audio_file.read()
+        
+        # Create a temporary file for the original audio
+        file_extension = audio_file.name.split('.')[-1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as tmp_original:
+            tmp_original.write(audio_bytes)
+            original_path = tmp_original.name
+
+        # Load the audio using pydub
+        try:
+            # Try loading based on file extension
+            audio = AudioSegment.from_file(original_path, format=file_extension)
+        except:
+            # If that fails, try automatic format detection
+            audio = AudioSegment.from_file(original_path)
+
+        # Convert to mono if stereo
+        if audio.channels > 1:
+            audio = audio.set_channels(1)
+
+        # Set frame rate to 16000 Hz if different
+        if audio.frame_rate != 16000:
+            audio = audio.set_frame_rate(16000)
+
+        chunks = []
+        
+        # Split into chunks
+        for i in range(0, len(audio), chunk_duration_ms):
+            chunk = audio[i:i + chunk_duration_ms]
+            chunks.append(chunk)
+
+        return chunks
+
+    except Exception as e:
+        st.error(f"Error processing audio file: {str(e)}")
+        logger.error(f"Error in chunk_audio: {str(e)}", exc_info=True)
+        raise
+    finally:
+        # Cleanup
+        if 'original_path' in locals():
+            try:
+                os.unlink(original_path)
+            except:
+                pass
+
+def process_chunk(chunk, pipeline, whisper_model, use_gpu=False):
+    """Process a single audio chunk"""
+    try:
+        # Create temporary file for the chunk
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_chunk:
+            # Export with specific parameters
+            chunk.export(
+                tmp_chunk.name,
+                format='wav',
+                parameters=[
+                    "-ac", "1",  # mono
+                    "-ar", "16000"  # 16kHz sample rate
+                ]
+            )
+            chunk_path = tmp_chunk.name
+
+        # Load audio for Whisper
+        audio = whisper.load_audio(chunk_path)
+        audio = whisper.pad_or_trim(audio)
+        
+        # Make log-Mel spectrogram
+        mel = whisper.log_mel_spectrogram(audio).to(whisper_model.device)
+
+        # Detect language
+        _, probs = whisper_model.detect_language(mel)
+        detected_language = max(probs, key=probs.__getitem__)
+
+        # Decode audio
+        options = whisper.DecodingOptions(
+            fp16=use_gpu,
+            language=detected_language
+        )
+        
+        result = whisper.decode(whisper_model, mel, options)
+
+        # Create transcription dict
+        transcription = {
+            'text': result.text,
+            'segments': [{
+                'text': result.text,
+                'start': 0,
+                'end': len(audio) / whisper.audio.SAMPLE_RATE
+            }]
+        }
+
+        # Perform diarization
+        diarization = pipeline(chunk_path)
+
+        return diarization, transcription
+
+    except Exception as e:
+        logger.error(f"Error in process_chunk: {str(e)}", exc_info=True)
+        raise
+
+    finally:
+        # Cleanup
+        if 'chunk_path' in locals():
+            try:
+                os.unlink(chunk_path)
+            except:
+                pass
 
 def merge_diarization_segments(diarization):
     """Merge consecutive segments from the same speaker in diarization"""
     merged_segments = []
     current_segment = None
-    
+
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         if not current_segment:
             current_segment = {
@@ -137,21 +208,16 @@ def merge_diarization_segments(diarization):
                 'start': turn.start,
                 'end': turn.end
             }
-    
+
     if current_segment:
         merged_segments.append(current_segment)
-    
+
     return merged_segments
 
 def get_segments_from_diarization(diarization, transcription):
     """Extract segments from diarization and transcription"""
     # First, merge diarization segments
     merged_diar_segments = merge_diarization_segments(diarization)
-    
-    # Debug print
-    logger.info("Merged Diarization Segments:")
-    for seg in merged_diar_segments:
-        logger.info(f"{seg['speaker']}: {format_timestamp(seg['start'])} - {format_timestamp(seg['end'])}")
     
     segments = []
     
@@ -168,50 +234,30 @@ def get_segments_from_diarization(diarization, transcription):
                 overlapping_diar.append(diar_seg)
         
         if overlapping_diar:
-            # Split the transcription text among the overlapping segments
-            for i, diar_seg in enumerate(overlapping_diar):
+            # Use the most overlapping speaker for this transcription segment
+            max_overlap = 0
+            best_speaker = None
+            best_segment = None
+            
+            for diar_seg in overlapping_diar:
                 overlap_start = max(trans_start, diar_seg['start'])
                 overlap_end = min(trans_end, diar_seg['end'])
+                overlap_duration = overlap_end - overlap_start
                 
-                # Calculate the portion of text that belongs to this segment
-                if len(overlapping_diar) == 1:
-                    text_portion = trans_text
-                else:
-                    # Split text based on time overlap
-                    overlap_duration = overlap_end - overlap_start
-                    total_duration = sum(min(d['end'], trans_end) - max(d['start'], trans_start) 
-                                      for d in overlapping_diar)
-                    ratio = overlap_duration / total_duration
-                    words = trans_text.split()
-                    word_count = max(1, int(len(words) * ratio))
-                    text_portion = " ".join(words[:word_count])
-                    trans_text = " ".join(words[word_count:])
-                
+                if overlap_duration > max_overlap:
+                    max_overlap = overlap_duration
+                    best_speaker = diar_seg['speaker']
+                    best_segment = diar_seg
+
+            if best_segment:
                 segments.append({
-                    'speaker': diar_seg['speaker'],
-                    'start_time': format_timestamp(diar_seg['start']),
-                    'end_time': format_timestamp(diar_seg['end']),
-                    'start': diar_seg['start'],
-                    'end': diar_seg['end'],
-                    'text': text_portion.strip()
+                    'speaker': best_speaker,
+                    'start': trans_start,
+                    'end': trans_end,
+                    'text': trans_text
                 })
     
-    # Sort segments by start time
-    segments.sort(key=lambda x: x['start'])
-    
-    # Merge segments with the same time boundaries
-    final_segments = []
-    for segment in segments:
-        if not final_segments or \
-           final_segments[-1]['speaker'] != segment['speaker'] or \
-           final_segments[-1]['end'] != segment['start']:
-            final_segments.append(segment)
-        else:
-            final_segments[-1]['text'] += ' ' + segment['text']
-            final_segments[-1]['end'] = segment['end']
-            final_segments[-1]['end_time'] = segment['end_time']
-    
-    return final_segments
+    return segments
 
 def main():
     st.title("🎤 Audio Transcription & Speaker Diarization")
@@ -238,11 +284,6 @@ def main():
             use_gpu = st.checkbox("Use GPU", value=True)
         else:
             st.warning("❌ GPU/CUDA not available. Using CPU only.")
-            st.info("""To enable GPU support, install CUDA and torch with CUDA support:
-            1. Install NVIDIA CUDA Toolkit
-            2. Install PyTorch with CUDA: 
-               `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118`
-            """)
             use_gpu = False
 
         st.markdown("---")
@@ -278,35 +319,29 @@ def main():
             num_speakers = None
             min_speakers = st.number_input("Minimum Speakers", min_value=1, value=1)
             max_speakers = st.number_input("Maximum Speakers", min_value=1, value=5)
-        
-        # Debug Options
-        with st.expander("Debug Options"):
-            show_raw_output = st.checkbox("Show Raw Output")
-            show_debug_logs = st.checkbox("Show Debug Logs")
 
     # Main content area
     st.subheader("Upload Audio")
     audio_file = st.file_uploader("Choose an audio file", type=['wav', 'mp3'])
-    
+
     if audio_file is not None:
-        # Create a progress bar and status containers
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        debug_log = st.empty() if show_debug_logs else None
-        
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
-            tmp_file.write(audio_file.getvalue())
-            audio_path = tmp_file.name
-            
+        # Debug information
+        st.write("File details:", {
+            "name": audio_file.name,
+            "type": audio_file.type,
+            "size": audio_file.size
+        })
+
         try:
-            # Loading models
+            # Display audio file
+            st.audio(audio_file)
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            transcription_container = st.empty()
+
+            # Load models
             status_text.text("Loading models...")
-            progress_bar.progress(20)
-            
-            if debug_log:
-                debug_log.info("Initializing pipeline and models...")
-            
             pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
                 use_auth_token=hf_token
@@ -318,125 +353,95 @@ def main():
             whisper_model = whisper.load_model(whisper_model_size)
             if use_gpu and torch.cuda.is_available():
                 whisper_model = whisper_model.to(torch.device("cuda"))
+
+            # Reset file pointer
+            audio_file.seek(0)
+
+            # Split audio into chunks
+            status_text.text("Splitting audio into chunks...")
+            chunks = chunk_audio(audio_file, chunk_duration_ms=10000)  # 10-second chunks
+            total_chunks = len(chunks)
             
-            if debug_log:
-                debug_log.info("Models loaded successfully")
+            all_segments = []
+            current_display = ""
             
-            # Processing audio
-            status_text.text("Processing audio...")
-            progress_bar.progress(40)
-            
-            diarization, transcription = process_audio(
-                audio_path,
-                pipeline,
-                whisper_model,
-                num_speakers=num_speakers,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                whisper_language=whisper_language if whisper_language else None,
-                whisper_task=whisper_task,
-                use_gpu=use_gpu
-            )
-            
-            # Debug information
-            if show_raw_output:
-                st.subheader("Debug Information")
+            # Process each chunk
+            for i, chunk in enumerate(chunks):
+                status_text.text(f"Processing chunk {i+1}/{total_chunks}...")
+                progress = (i + 1) / total_chunks
+                progress_bar.progress(progress)
                 
-                with st.expander("Raw Diarization Segments"):
-                    diarization_count = 0
-                    for turn, _, speaker in diarization.itertracks(yield_label=True):
-                        st.write(f"{speaker}: {format_timestamp(turn.start)} - {format_timestamp(turn.end)}")
-                        diarization_count += 1
-                    st.info(f"Total diarization segments: {diarization_count}")
-                
-                with st.expander("Raw Transcription Segments"):
-                    for i, segment in enumerate(transcription['segments']):
-                        st.write(f"{format_timestamp(segment['start'])} - {format_timestamp(segment['end'])}: {segment['text']}")
-                    st.info(f"Total transcription segments: {len(transcription['segments'])}")
-            
-            # Get segments
-            status_text.text("Processing results...")
-            progress_bar.progress(70)
-            segments = get_segments_from_diarization(diarization, transcription)
-            
-            # Display results
-            status_text.text("Preparing display...")
-            progress_bar.progress(90)
-            
-            st.markdown("## 📝 Transcription Results")
-            
-            if not segments:
-                st.warning("No segments were produced. Try adjusting the configuration:")
-                st.markdown("""
-                - Specify the exact number of speakers if known
-                - Try a larger Whisper model
-                - Check if the audio is clear and speakers are distinct
-                - Try specifying the language
-                """)
-                
-                if debug_log:
-                    debug_log.error("No segments were produced from the processing")
-            else:
-                # Display results
-                current_speaker = None
-                for segment in segments:
-                    if current_speaker != segment['speaker']:
-                        st.markdown(f"### {segment['speaker']}")
-                        current_speaker = segment['speaker']
-                    
-                    st.markdown(
-                        f"""
-                        <div class="timestamp">{segment['start_time']} - {segment['end_time']}</div>
-                        <div class="transcription-text">{segment['text']}</div>
-                        """, 
-                        unsafe_allow_html=True
+                try:
+                    # Process chunk
+                    diarization, transcription = process_chunk(
+                        chunk,
+                        pipeline,
+                        whisper_model,
+                        use_gpu=use_gpu
                     )
+                    
+                    # Get segments for this chunk
+                    chunk_segments = get_segments_from_diarization(diarization, transcription)
+                    
+                    # Adjust timestamps for chunks
+                    chunk_offset = i * 10  # 10 seconds per chunk
+                    for segment in chunk_segments:
+                        segment['start'] += chunk_offset
+                        segment['end'] += chunk_offset
+                        segment['start_time'] = format_timestamp(segment['start'])
+                        segment['end_time'] = format_timestamp(segment['end'])
+                    
+                    all_segments.extend(chunk_segments)
+                    
+                    # Update display
+                    current_display = ""
+                    current_speaker = None
+                    for segment in all_segments:
+                        if current_speaker != segment['speaker']:
+                            current_display += f"\n### {segment['speaker']}\n"
+                            current_speaker = segment['speaker']
+                        
+                        current_display += f"**{segment['start_time']} - {segment['end_time']}**\n{segment['text']}\n\n"
+                    
+                    transcription_container.markdown(current_display)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing chunk {i+1}: {str(e)}")
+                    st.warning(f"Warning: Error processing chunk {i+1}. Continuing with next chunk...")
+                    continue
                 
-                # Download options
-                st.markdown("---")
-                st.subheader("📥 Download Results")
-                
-                # CSV download
-                df = pd.DataFrame(segments)
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="Download as CSV",
-                    data=csv,
-                    file_name="transcription.csv",
-                    mime="text/csv"
-                )
-                
-                # Text format download
-                text_content = ""
-                current_speaker = None
-                for segment in segments:
-                    if current_speaker != segment['speaker']:
-                        text_content += f"\n\n{segment['speaker']}:\n"
-                        current_speaker = segment['speaker']
-                    text_content += f"[{segment['start_time']} - {segment['end_time']}] {segment['text']}\n"
-                
-                st.download_button(
-                    label="Download as Text",
-                    data=text_content,
-                    file_name="transcription.txt",
-                    mime="text/plain"
-                )
+                # Add a small delay to simulate real-time processing
+                time.sleep(0.1)
             
-            progress_bar.progress(100)
+            # Final display and download options
             status_text.text("Processing completed!")
             
+            # Download options
+            st.markdown("---")
+            st.subheader("📥 Download Results")
+            
+            # CSV download
+            df = pd.DataFrame(all_segments)
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="Download as CSV",
+                data=csv,
+                file_name="transcription.csv",
+                mime="text/csv"
+            )
+            
+            # Text format download
+            text_content = current_display
+            st.download_button(
+                label="Download as Text",
+                data=text_content,
+                file_name="transcription.txt",
+                mime="text/plain"
+            )
+
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
-            if debug_log:
-                debug_log.exception("Error during processing")
             logger.error("Processing error", exc_info=True)
-            
-        finally:
-            # Cleanup
-            try:
-                os.unlink(audio_path)
-            except:
-                pass
 
 if __name__ == "__main__":
     main()
